@@ -1,0 +1,23 @@
+{
+  "name": "parachute-pebble",
+  "author": "Aaron Gabriel",
+  "version": "0.0.1",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Parachute",
+    "uuid": "98c20854-fbf6-45db-a654-45536a468690",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["basalt", "chalk", "diorite", "emery", "flint", "gabbro"],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": ["CAPTURE_TEXT", "CAPTURE_VOICE", "ACK_STATUS", "JS_READY", "SEQ", "QUICK_LOGS"],
+    "capabilities": ["configurable"],
+    "resources": {
+      "media": []
+    }
+  }
+}

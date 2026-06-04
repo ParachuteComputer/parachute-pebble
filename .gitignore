@@ -1,0 +1,16 @@
+# Pebble build output
+build/
+*.pbw
+
+# SDK / tooling
+.pebble-cache/
+node_modules/
+
+# OS
+.DS_Store
+
+# local screenshots
+*.png
+
+# waf build lock
+.lock-waf*

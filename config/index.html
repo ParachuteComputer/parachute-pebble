@@ -1,0 +1,91 @@
+<!doctype html>
+<!--
+  Parachute Pebble — hosted config page (OPTIONAL).
+
+  By default the app opens an identical config page built in to the phone-side
+  JS as a data: URL, so you DON'T need to host anything. Host this file only if
+  your phone's Pebble app refuses to open data: URLs — then set CONFIG_URL in
+  src/pkjs/index.js to its URL.
+
+  v0 keeps it simple: paste a pre-minted write token
+  (parachute auth mint-token --scope vault:default:write) and edit your
+  quick-logs. A future version can run the hub's OAuth + PKCE flow here (this
+  page is a real browser) to skip pasted secrets.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parachute Pebble</title>
+    <style>
+      body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 20px; background: #f5f5f7; color: #1d1d1f; }
+      h1 { font-size: 19px; margin: 0 0 16px; }
+      label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 5px; }
+      input, textarea { width: 100%; box-sizing: border-box; padding: 11px; font-size: 16px; border: 1px solid #d2d2d7; border-radius: 9px; background: #fff; }
+      textarea { font-family: ui-monospace, monospace; font-size: 14px; }
+      .hint { font-size: 12px; color: #6e6e73; margin-top: 4px; }
+      button { width: 100%; margin-top: 22px; padding: 14px; font-size: 16px; font-weight: 600; color: #fff; background: #0071e3; border: none; border-radius: 12px; }
+      code { background: #ececf0; padding: 1px 4px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Parachute Pebble</h1>
+
+    <label for="hub">Hub origin</label>
+    <input id="hub" type="url" placeholder="https://your-tunnel.example.com" autocapitalize="off" autocorrect="off" />
+    <div class="hint">Your hub's URL as your phone can reach it (the Cloudflare-tunnel URL).</div>
+
+    <label for="vault">Vault</label>
+    <input id="vault" type="text" value="default" autocapitalize="off" autocorrect="off" />
+
+    <label for="token">Write token</label>
+    <input id="token" type="text" placeholder="eyJ..." autocapitalize="off" autocorrect="off" />
+    <div class="hint">Mint with <code>parachute auth mint-token --scope vault:default:write</code></div>
+
+    <label for="ql">Quick-logs (one per line: Label | note text)</label>
+    <textarea id="ql" rows="6" placeholder="Water | Drank water&#10;Meds | Took meds"></textarea>
+    <div class="hint">Tap a label on the watch to save that note. Leave empty for voice-only.</div>
+
+    <button id="save">Save</button>
+
+    <script>
+      function qp(name) {
+        var m = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
+        return m ? decodeURIComponent(m[1]) : "";
+      }
+      var returnTo = qp("return_to") || "pebblejs://close#";
+      try {
+        var cur = JSON.parse(qp("current") || "{}");
+        if (cur.hub) document.getElementById("hub").value = cur.hub;
+        if (cur.vault) document.getElementById("vault").value = cur.vault;
+        if (cur.token) document.getElementById("token").value = cur.token;
+        if (cur.quicklogs && cur.quicklogs.length) {
+          document.getElementById("ql").value = cur.quicklogs
+            .map(function (q) { return q.label + " | " + q.text; })
+            .join("\n");
+        }
+      } catch (e) {}
+
+      document.getElementById("save").addEventListener("click", function () {
+        var ql = document
+          .getElementById("ql")
+          .value.split("\n")
+          .map(function (line) {
+            var i = line.indexOf("|");
+            if (i < 0) return null;
+            var a = line.slice(0, i).trim();
+            var b = line.slice(i + 1).trim();
+            return a && b ? { label: a, text: b } : null;
+          })
+          .filter(Boolean);
+        var out = {
+          hub: document.getElementById("hub").value.trim(),
+          vault: document.getElementById("vault").value.trim() || "default",
+          token: document.getElementById("token").value.trim(),
+          quicklogs: ql,
+        };
+        document.location = returnTo + encodeURIComponent(JSON.stringify(out));
+      });
+    </script>
+  </body>
+</html>
