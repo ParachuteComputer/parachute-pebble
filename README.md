@@ -2,31 +2,30 @@
 
 Capture from your wrist straight into your Parachute vault.
 
-Press the app → pick a canned quick-log, or dictate a ~15-second voice note → it
-lands in your vault as a `#capture/text` / `#capture/voice` note, in the same
-inbox everything else flows into. The watch has no internet; the phone-side
-PebbleKit JS does the HTTP. Captures made offline are queued and flushed when
-your vault is reachable again.
-
-This is the **training-wheels** version — deliberately small, deliberately
-short-form. See [Roadmap](#roadmap) for where it goes.
+**Open the app and it's already listening.** Speak — for two seconds or two
+minutes — and when you stop, the note lands in your vault as a `#capture/voice`
+note, in the same inbox everything else flows into. The result screen shows you
+exactly what it heard. The watch has no internet; the phone-side PebbleKit JS
+does the HTTP. Captures made offline are queued and flushed when your vault is
+reachable again.
 
 ## The honest constraints (read these first)
 
-- **~15 seconds per voice note, hard.** A single Pebble `DictationSession` is
-  capped at 15s by firmware (`DICTATION_TIMEOUT` in
-  [PebbleOS](https://github.com/coredevices/PebbleOS)), independent of which
-  speech backend you use. This app
-  is built for short, atomic captures ("idea: …", "remember to …"). Long-form
-  voice belongs on the **Index 01 ring** (~5 min, on-device Parakeet, fork-free
-  webhook) or on a forked firmware that raises that constant.
+- **Long notes are stitched from ~15s legs.** PebbleOS hard-caps a single
+  `DictationSession` recording at ~15s (`DICTATION_TIMEOUT` in
+  [PebbleOS](https://github.com/coredevices/PebbleOS)). This app chains legs:
+  when a leg's duration says the cap cut you off mid-riff, the next leg starts
+  automatically — keep talking through the beep, stop (or go silent) when done,
+  and the whole riff sends as **one** note. Caveat: with a *slow cloud* speech
+  backend the leg-timing heuristic can end a riff early; with on-phone (local)
+  STT it's reliable. True gapless long-form belongs on the **Index 01 ring**
+  (~5 min, audio retained) or a firmware fork.
 - **Transcript only — no audio.** A watchapp can never access raw mic audio
   (the only mic API, `DictationSession`, returns text). So Pebble voice captures
   carry the transcript but not a `.webm` attachment, unlike phone memos.
 - **Voice depends on your watch's dictation working.** On Pebble Time 2, early
-  firmware had a known "Dictation is not available" bug. The **canned quick-logs
-  need no microphone** and always work — that's why they're the headline path
-  until you've confirmed dictation on your watch.
+  firmware had a known "Dictation is not available" bug (fixed in PebbleOS
+  ≥4.9.158). Quick-logs need no microphone if you want a zero-dictation path.
 
 ## What it writes
 
@@ -59,7 +58,7 @@ pebble sdk install latest
 
 ### 1. Point it at your vault
 
-For v0, edit the constants at the top of [`src/pkjs/index.js`](src/pkjs/index.js):
+For a quick start, edit the constants at the top of [`src/pkjs/index.js`](src/pkjs/index.js):
 
 ```js
 var DEFAULT_HUB   = "https://your-tunnel.example.com"; // phone-reachable hub origin
@@ -95,19 +94,18 @@ pebble install --emulator emery
 pebble install --phone <phone-ip>
 ```
 
-## Your quick-logs (configurable from the phone)
+## Quick-logs (optional, configurable from the phone)
 
-The menu's quick-logs — tap a label to save a fixed `#capture/text` note — are
-edited on the **config page** (gear icon → Quick-logs), one `Label | note text`
-per line. The phone pushes the list to the watch over AppMessage (`QUICK_LOGS`)
-and the menu **rebuilds live** — no rebuild, no reinstall. The
-`DEFAULT_QUICK_LOGS` in [`src/c/parachute_pebble.c`](src/c/parachute_pebble.c)
-are only the fallback shown until your list arrives. Leave the list empty for a
-voice-only app.
+**There are none by default — voice is the product.** If you want tap-to-capture
+fixed notes (meds, habits, whatever you log), add them on the **config page**
+(gear icon → Quick-logs), one `Label | note text` per line. The phone pushes the
+list to the watch over AppMessage (`QUICK_LOGS`) and the menu — which sits
+behind the launch dictation (press BACK) — **rebuilds live**, no reinstall.
 
 ## Roadmap
 
-1. **v0 (here):** 15s voice dictation + **phone-configurable quick-logs** →
+1. **v0.2 (here):** voice-first launch, **chained dictation for long notes**,
+   transcript shown on save, phone-configurable quick-logs (none by default) →
    `POST /api/notes`; offline queue, SEQ dedupe, JS_READY handshake, ACK watchdog.
 2. **Config via OAuth:** the config page (a real browser) runs the hub's
    OAuth 2.1 + PKCE via `surface-client` instead of a pasted token; pkjs

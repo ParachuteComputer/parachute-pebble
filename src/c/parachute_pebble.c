@@ -4,40 +4,50 @@
 // dictation, or a tap on a configurable quick-log) and hands the text to the
 // phone over AppMessage. The phone-side code (src/pkjs/index.js) does the actual
 // HTTP POST to your vault, then sends back an ACK. The watch shows Sending /
-// Saving / Saved / Queued / Failed.
+// Saving / Saved / Queued / Failed — plus the transcript it captured.
 //
-// The quick-logs menu is DYNAMIC: the phone pushes a QUICK_LOGS list (edited on
-// the config page) and the menu rebuilds from it. Built-in defaults show until
-// the phone's list arrives.
+// VOICE-FIRST: launching the app starts dictation immediately — open, speak,
+// done. BACK during the first dictation lands on the menu (quick-logs, if you
+// configured any; there are none by default).
+//
+// CHAINED DICTATION (longer than the firmware's ~15s): PebbleOS hard-caps a
+// single DictationSession recording at ~15s (DICTATION_TIMEOUT). We chain legs:
+// if a leg's wall-clock suggests the cap cut you off mid-riff, the next leg
+// starts automatically — keep talking through the beep. Stop talking (silence)
+// or stop early (Select) and the stitched note sends as one capture. The
+// heuristic costs nothing when wrong: a riff just ends one leg early.
 //
 // Reliability (per Pebble AppMessage best practices):
 //   - one in-flight message at a time; sends gated on a JS_READY handshake
 //   - APP_MSG_BUSY / transient send failures retry with bounded backoff
 //   - every capture carries a monotonic SEQ so pkjs can dedupe a redelivery
 //   - an ACK watchdog rescues the UI if the phone never replies
-//
-// Firmware reality: a single DictationSession is hard-capped at ~15 seconds
-// (DICTATION_TIMEOUT in PebbleOS). Built for short, atomic captures.
 
 #include <pebble.h>
 
-#define DICTATION_BUFFER_SIZE 768
-#define PENDING_TEXT_MAX 768
-#define INBOX_SIZE 768         // holds the QUICK_LOGS list (+ small ACK/JS_READY)
-#define OUTBOX_SIZE 1024       // holds a ~768B transcript + SEQ + overhead
+#define DICTATION_BUFFER_SIZE 768   // per-leg transcript buffer (~15s of speech)
+#define ACCUM_TEXT_MAX 4000         // stitched multi-leg note budget (clamped by outbox)
+#define INBOX_SIZE 768              // holds the QUICK_LOGS list (+ small ACK/JS_READY)
 #define BUSY_RETRY_MS 200
 #define SEND_RETRY_MS 500
 #define READY_FALLBACK_MS 3000
 #define ACK_WATCHDOG_MS 18000
 #define RESULT_VISIBLE_MS 1800
+#define RESULT_VISIBLE_LONG_MS 5200 // when a transcript is on screen, linger
 #define MAX_ATTEMPTS 8
 
-// Quick-logs: tap-to-capture a fixed #capture/text note. Edited on the phone
-// config page and pushed over QUICK_LOGS; these are just the fallback defaults.
+// A dictation leg's elapsed time (listening + transcription) at or above this
+// means the ~15s firmware cap almost certainly ended it, not the speaker —
+// 15000ms of listening plus any processing. Short utterances only cross this
+// if transcription itself takes >7s, which local STT doesn't.
+#define AUTO_CONTINUE_MS 15500
+
+// Quick-logs: tap-to-capture a fixed #capture/text note. NONE by default —
+// voice is the product. Add your own on the phone config page; they're pushed
+// over QUICK_LOGS and the menu rebuilds live.
 #define MAX_QUICK_LOGS 10
 #define LABEL_MAX 28
 #define TEXT_MAX 80
-#define DEFAULT_QUICK_LOGS "Water | Drank water\nCoffee | Had coffee"
 
 typedef struct {
   char label[LABEL_MAX];
@@ -60,9 +70,16 @@ static bool s_js_ready;
 static uint32_t s_seq;
 static int s_attempts;
 
+// pending capture (one at a time), sized for a full stitched note
 static bool s_has_pending;
 static uint32_t s_pending_key;
-static char s_pending_text[PENDING_TEXT_MAX];
+static char s_pending_text[ACCUM_TEXT_MAX];
+
+// chained-dictation accumulator
+static char s_accum[ACCUM_TEXT_MAX];
+static size_t s_accum_len;
+static size_t s_text_budget;     // usable bytes given the negotiated outbox
+static uint64_t s_leg_start_ms;
 
 static AppTimer *s_retry_timer;
 static AppTimer *s_ready_fallback_timer;
@@ -70,10 +87,20 @@ static AppTimer *s_ack_timer;
 
 static Window *s_result_window;
 static TextLayer *s_result_text;
+static TextLayer *s_result_detail;
+static const char *s_result_detail_ptr; // points at static buffers only
 static AppTimer *s_result_dismiss_timer;
 static char s_result_buf[64];
 
 static void try_send_pending(void);
+static void start_voice_leg(void);
+
+static uint64_t now_ms(void) {
+  time_t sec;
+  uint16_t ms;
+  time_ms(&sec, &ms);
+  return (uint64_t)sec * 1000 + ms;
+}
 
 // ---------- quick-logs parsing ----------
 static void trim_copy(char *dst, size_t dstsize, const char *src, int len) {
@@ -91,8 +118,9 @@ static void trim_copy(char *dst, size_t dstsize, const char *src, int len) {
   dst[len] = '\0';
 }
 
-// Parse "Label | note text" lines (one per line) into s_logs.
-static void parse_quick_logs(const char *cfg) {
+// Parse "Label | note text" lines (one per line) into s_logs. An empty or
+// unusable config simply means no quick-logs — voice-only.
+static void apply_quick_logs(const char *cfg) {
   s_log_count = 0;
   if (!cfg) {
     return;
@@ -121,15 +149,7 @@ static void parse_quick_logs(const char *cfg) {
   }
 }
 
-// Apply a config string; fall back to defaults if it yields nothing usable.
-static void apply_quick_logs(const char *cfg) {
-  parse_quick_logs(cfg);
-  if (s_log_count == 0) {
-    parse_quick_logs(DEFAULT_QUICK_LOGS);
-  }
-}
-
-// ---------- result window (lightweight feedback) ----------
+// ---------- result window (status + transcript) ----------
 static void result_dismiss_cb(void *data) {
   s_result_dismiss_timer = NULL;
   if (s_result_window) {
@@ -140,11 +160,20 @@ static void result_dismiss_cb(void *data) {
 static void result_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect b = layer_get_bounds(root);
-  s_result_text = text_layer_create(GRect(4, (b.size.h - 56) / 2, b.size.w - 8, 56));
+  s_result_text = text_layer_create(GRect(4, 2, b.size.w - 8, 34));
   text_layer_set_text_alignment(s_result_text, GTextAlignmentCenter);
   text_layer_set_font(s_result_text, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
   text_layer_set_text(s_result_text, s_result_buf);
   layer_add_child(root, text_layer_get_layer(s_result_text));
+
+  s_result_detail = text_layer_create(GRect(6, 40, b.size.w - 12, b.size.h - 44));
+  text_layer_set_text_alignment(s_result_detail, GTextAlignmentCenter);
+  text_layer_set_font(s_result_detail, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_overflow_mode(s_result_detail, GTextOverflowModeTrailingEllipsis);
+  if (s_result_detail_ptr) {
+    text_layer_set_text(s_result_detail, s_result_detail_ptr);
+  }
+  layer_add_child(root, text_layer_get_layer(s_result_detail));
 }
 
 static void result_window_unload(Window *window) {
@@ -152,6 +181,11 @@ static void result_window_unload(Window *window) {
     text_layer_destroy(s_result_text);
     s_result_text = NULL;
   }
+  if (s_result_detail) {
+    text_layer_destroy(s_result_detail);
+    s_result_detail = NULL;
+  }
+  s_result_detail_ptr = NULL; // make the no-stale-detail invariant explicit
   window_destroy(s_result_window);
   s_result_window = NULL;
 }
@@ -159,6 +193,14 @@ static void result_window_unload(Window *window) {
 static void set_result_buf(const char *msg) {
   strncpy(s_result_buf, msg, sizeof(s_result_buf) - 1);
   s_result_buf[sizeof(s_result_buf) - 1] = '\0';
+}
+
+// detail must point at static storage (s_pending_text) or be NULL.
+static void set_result_detail(const char *detail) {
+  s_result_detail_ptr = detail;
+  if (s_result_detail) {
+    text_layer_set_text(s_result_detail, detail ? detail : "");
+  }
 }
 
 static void show_result_window(const char *msg) {
@@ -184,7 +226,10 @@ static void set_result(const char *msg, bool done) {
     if (s_result_dismiss_timer) {
       app_timer_cancel(s_result_dismiss_timer);
     }
-    s_result_dismiss_timer = app_timer_register(RESULT_VISIBLE_MS, result_dismiss_cb, NULL);
+    uint32_t visible = (s_result_detail_ptr && s_result_detail_ptr[0])
+                           ? RESULT_VISIBLE_LONG_MS
+                           : RESULT_VISIBLE_MS;
+    s_result_dismiss_timer = app_timer_register(visible, result_dismiss_cb, NULL);
   }
 }
 
@@ -254,6 +299,7 @@ static void request_capture(uint32_t key, const char *text) {
   s_pending_key = key;
   s_has_pending = true;
   s_attempts = 0;
+  set_result_detail(s_pending_text); // before the push, so a fresh window loads it
   show_result_window("Sending...");
   try_send_pending();
 }
@@ -282,6 +328,9 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     try_send_pending();
   }
 
+  // Note: ACKs are not matched to SEQ on this side — with one capture in
+  // flight at a time the correlation is implicit; a crossed ACK is a brief
+  // cosmetic mismatch at worst.
   Tuple *ack = dict_find(iter, MESSAGE_KEY_ACK_STATUS);
   if (ack) {
     if (s_ack_timer) {
@@ -331,7 +380,7 @@ static void outbox_failed_handler(DictionaryIterator *iter, AppMessageResult rea
   clear_pending();
 }
 
-// ---------- dictation ----------
+// ---------- chained dictation ----------
 #if defined(PBL_MICROPHONE)
 static void configure_dictation(void) {
   if (s_dictation_session) {
@@ -340,12 +389,47 @@ static void configure_dictation(void) {
   }
 }
 
+static void append_leg(const char *text) {
+  size_t tlen = strlen(text);
+  size_t sep = s_accum_len ? 1 : 0;
+  size_t room = (s_text_budget > s_accum_len + sep)
+                    ? s_text_budget - s_accum_len - sep
+                    : 0;
+  if (tlen > room) {
+    tlen = room;
+  }
+  if (tlen == 0) {
+    return;
+  }
+  if (sep) {
+    s_accum[s_accum_len++] = ' ';
+  }
+  memcpy(s_accum + s_accum_len, text, tlen);
+  s_accum_len += tlen;
+  s_accum[s_accum_len] = '\0';
+}
+
+static void finish_voice_capture(void) {
+  if (s_accum_len) {
+    request_capture(MESSAGE_KEY_CAPTURE_VOICE, s_accum);
+  }
+}
+
 static void dictation_status_callback(DictationSession *session, DictationSessionStatus status,
                                       char *transcription, void *context) {
   if (status == DictationSessionStatusSuccess) {
-    request_capture(MESSAGE_KEY_CAPTURE_VOICE, transcription);
+    uint64_t elapsed = now_ms() - s_leg_start_ms;
+    append_leg(transcription);
+    bool nearly_full = s_accum_len + 16 >= s_text_budget;
+    if (elapsed >= AUTO_CONTINUE_MS && !nearly_full) {
+      // The firmware cap ended this leg, not the speaker — keep listening.
+      start_voice_leg();
+      return;
+    }
+    finish_voice_capture();
     return;
   }
+
   // Recreate a stale session (revival-era Pebble Time 2 dictation bug).
   if (status == DictationSessionStatusFailureInternalError ||
       status == DictationSessionStatusFailureDisabled) {
@@ -354,18 +438,62 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
                                                    dictation_status_callback, NULL);
     configure_dictation();
   }
+
+  if (s_accum_len) {
+    // Mid-chain stop (silence, BACK, or an error after real content): the riff
+    // is over — send what we have. Inbox philosophy: capture beats discard.
+    finish_voice_capture();
+    return;
+  }
+  if (status == DictationSessionStatusFailureTranscriptionRejected ||
+      status == DictationSessionStatusFailureTranscriptionRejectedWithError) {
+    return; // backed out before saying anything — quiet cancel, menu remains
+  }
+  set_result_detail(NULL);
   show_result_window("No transcript");
   set_result("No transcript", true);
 }
 #endif
+
+static void start_voice_leg(void) {
+#if defined(PBL_MICROPHONE)
+  if (s_dictation_session) {
+    s_leg_start_ms = now_ms();
+    dictation_session_start(s_dictation_session);
+    return;
+  }
+#endif
+  set_result_detail(NULL);
+  show_result_window("No microphone");
+  set_result("No microphone", true);
+}
+
+static void begin_voice_capture(void) {
+  if (s_has_pending) {
+    show_result_window("Sending..."); // a capture is still in flight — don't clobber it
+    return;
+  }
+  s_accum_len = 0;
+  s_accum[0] = '\0';
+  start_voice_leg();
+}
 
 // ---------- menu (dynamic) ----------
 static int quick_log_row(int row) {
   return s_has_voice_item ? row - 1 : row;
 }
 
+static uint16_t menu_total_rows(void) {
+  uint16_t n = (s_has_voice_item ? 1 : 0) + s_log_count;
+  return n > 0 ? n : 1; // a lone hint row when there's nothing else
+}
+
+static bool menu_is_hint_row(void) {
+  return (s_has_voice_item ? 1 : 0) + s_log_count == 0;
+}
+
 static uint16_t menu_get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
-  return (s_has_voice_item ? 1 : 0) + s_log_count;
+  return menu_total_rows();
 }
 
 static int16_t menu_get_header_height(MenuLayer *ml, uint16_t section, void *ctx) {
@@ -377,9 +505,13 @@ static void menu_draw_header(GContext *gctx, const Layer *cell_layer, uint16_t s
 }
 
 static void menu_draw_row(GContext *gctx, const Layer *cell_layer, MenuIndex *cell_index, void *ctx) {
+  if (menu_is_hint_row()) {
+    menu_cell_basic_draw(gctx, cell_layer, "Add quick-logs", "Pebble app > Settings", NULL);
+    return;
+  }
   int row = cell_index->row;
   if (s_has_voice_item && row == 0) {
-    menu_cell_basic_draw(gctx, cell_layer, "Voice note", "Dictate (~15s)", NULL);
+    menu_cell_basic_draw(gctx, cell_layer, "Voice note", "Speak; pause to send", NULL);
     return;
   }
   int li = quick_log_row(row);
@@ -389,20 +521,20 @@ static void menu_draw_row(GContext *gctx, const Layer *cell_layer, MenuIndex *ce
 }
 
 static void menu_select(MenuLayer *ml, MenuIndex *cell_index, void *ctx) {
+  if (menu_is_hint_row()) {
+    return;
+  }
   int row = cell_index->row;
   if (s_has_voice_item && row == 0) {
-#if defined(PBL_MICROPHONE)
-    if (s_dictation_session) {
-      dictation_session_start(s_dictation_session);
-      return;
-    }
-#endif
-    show_result_window("No microphone");
-    set_result("No microphone", true);
+    begin_voice_capture();
     return;
   }
   int li = quick_log_row(row);
   if (li >= 0 && li < s_log_count) {
+    if (s_has_pending) {
+      show_result_window("Sending..."); // a capture is still in flight — don't clobber it
+      return;
+    }
     request_capture(MESSAGE_KEY_CAPTURE_TEXT, s_logs[li].text);
   }
 }
@@ -431,7 +563,12 @@ static void menu_window_unload(Window *window) {
 
 // ---------- app lifecycle ----------
 static void init(void) {
-  apply_quick_logs(NULL); // start with built-in defaults until the phone pushes its list
+  apply_quick_logs(NULL); // none until the phone pushes a configured list
+
+  // Seed SEQ from wall-clock so it stays monotonic across app launches —
+  // a per-launch counter restarting at 1 would collide with pkjs's
+  // already-seen dedupe and get fresh captures swallowed as duplicates.
+  s_seq = (uint32_t)time(NULL);
 
 #if defined(PBL_MICROPHONE)
   s_has_voice_item = true;
@@ -443,7 +580,19 @@ static void init(void) {
   app_message_register_inbox_dropped(inbox_dropped_handler);
   app_message_register_outbox_sent(outbox_sent_handler);
   app_message_register_outbox_failed(outbox_failed_handler);
-  app_message_open(INBOX_SIZE, OUTBOX_SIZE);
+
+  // Negotiate an outbox big enough for a stitched multi-leg note; clamp the
+  // text budget to whatever the firmware actually grants.
+  uint32_t outbox = ACCUM_TEXT_MAX + 128;
+  uint32_t outbox_max = app_message_outbox_size_maximum();
+  if (outbox > outbox_max) {
+    outbox = outbox_max;
+  }
+  app_message_open(INBOX_SIZE, outbox);
+  s_text_budget = (outbox > 192) ? outbox - 128 : 64;
+  if (s_text_budget > ACCUM_TEXT_MAX - 1) {
+    s_text_budget = ACCUM_TEXT_MAX - 1;
+  }
 
 #if defined(PBL_MICROPHONE)
   s_dictation_session = dictation_session_create(DICTATION_BUFFER_SIZE,
@@ -457,6 +606,14 @@ static void init(void) {
     .unload = menu_window_unload,
   });
   window_stack_push(s_menu_window, true);
+
+  // Voice-first: open the app and it's already listening. BACK lands on the
+  // menu underneath.
+#if defined(PBL_MICROPHONE)
+  if (s_dictation_session) {
+    begin_voice_capture();
+  }
+#endif
 }
 
 static void deinit(void) {
