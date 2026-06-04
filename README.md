@@ -94,6 +94,23 @@ pebble install --emulator emery
 pebble install --phone <phone-ip>
 ```
 
+## Voice mode
+
+Two modes, set on the gear page: **Send on pause** (default — every pause ends
+the note; quick atomic captures) and **Continuous** (every pause just reopens
+the mic and the transcript keeps stitching; finish with BACK or by staying
+silent through a full listen window). The gear page also shows the phone's
+**recent activity** (the last 12 capture/post/queue events) so "did it upload?"
+is readable, not forensic.
+
+## Sign in with OAuth (no pasted tokens)
+
+If your hub serves the `pebble-config` surface (parachute-surface ships it),
+the gear page's **"Sign in with your hub"** button opens
+`<hub>/surface/pebble-config/`, runs your hub's own OAuth consent, and hands
+back an auto-renewing token pair — the watch then refreshes its own access
+token on expiry. The pasted-token field remains as a manual fallback.
+
 ## Quick-logs (optional, configurable from the phone)
 
 **There are none by default — voice is the product.** If you want tap-to-capture
@@ -104,12 +121,12 @@ behind the launch dictation (press BACK) — **rebuilds live**, no reinstall.
 
 ## Roadmap
 
-1. **v0.2 (here):** voice-first launch, **chained dictation for long notes**,
-   transcript shown on save, phone-configurable quick-logs (none by default) →
-   `POST /api/notes`; offline queue, SEQ dedupe, JS_READY handshake, ACK watchdog.
-2. **Config via OAuth:** the config page (a real browser) runs the hub's
-   OAuth 2.1 + PKCE via `surface-client` instead of a pasted token; pkjs
-   refreshes over XHR.
+1. **v0.3 (here):** voice-first launch, continuous/send-on-pause **voice modes**,
+   chained dictation, transcript shown on save, **OAuth sign-in with auto-refresh**
+   (via the hub's `pebble-config` surface), event trail on the gear page,
+   queue hardening (poisoned items can't block the line), configurable
+   quick-logs (none by default), offline queue, SEQ dedupe, JS_READY handshake,
+   ACK watchdog.
 3. **Index 01 ingest:** a small vault-side webhook receiver turns the ring's
    webhook payload (audio + Parakeet transcript) into a full-fidelity
    `#capture/voice` note — the long-form companion to the watch's short-form.
