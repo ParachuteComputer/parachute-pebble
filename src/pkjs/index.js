@@ -93,24 +93,17 @@ function enqueue(item) {
 }
 
 // ---- SEQ dedupe (a BUSY-retry can redeliver the same capture) ----
-function loadSeen() {
-  try {
-    return JSON.parse(localStorage.getItem("pc_seen") || "[]");
-  } catch (e) {
-    return [];
-  }
-}
+// In-memory ONLY: redelivery can only happen within one watchapp session, and
+// persisting this set caused fresh captures after an app relaunch to be
+// swallowed as "duplicates" when the watch's counter restarted.
+var seenSeqs = [];
 function alreadySeen(seq) {
-  return seq > 0 && loadSeen().indexOf(seq) !== -1;
+  return seq > 0 && seenSeqs.indexOf(seq) !== -1;
 }
 function markSeen(seq) {
   if (!seq) return;
-  var s = loadSeen();
-  s.push(seq);
-  while (s.length > 30) s.shift();
-  try {
-    localStorage.setItem("pc_seen", JSON.stringify(s));
-  } catch (e) {}
+  seenSeqs.push(seq);
+  while (seenSeqs.length > 30) seenSeqs.shift();
 }
 
 function postNote(item, cb) {
@@ -189,6 +182,9 @@ function handleCapture(kind, text, seq) {
 }
 
 Pebble.addEventListener("ready", function () {
+  try {
+    localStorage.removeItem("pc_seen"); // stale persisted dedupe state from <=v0.1
+  } catch (e) {}
   // One message: unblock the watch's send gate AND push the current quick-logs.
   var msg = { JS_READY: 1 };
   var ql = quickLogsString();
