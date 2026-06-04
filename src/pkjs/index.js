@@ -21,6 +21,14 @@ var DEFAULT_TOKEN = ""; // mint with: parachute auth mint-token --scope vault:de
 // hosted copy of config/index.html if your phone's Pebble app won't open data: URLs.
 var CONFIG_URL = "";
 
+// The "Sign in with your hub" button on the gear page opens this static setup
+// page (GitHub Pages, a foreign origin). It runs the hub's OAuth 2.1 + PKCE flow
+// in a real browser against WHATEVER hub the user enters and hands back an
+// auto-renewing token pair. It replaces the old hub-hosted
+// `<hub>/surface/pebble-config/` surface, so a stock hub+vault server (no
+// surface-host module) can still sign the watch in. See web/setup/ + the README.
+var PAGES_CONFIG_URL = "https://parachutecomputer.github.io/parachute-pebble/";
+
 // ---- tiny config store (localStorage, per-app-UUID, survives reinstall) ----
 function getCfg(key, dflt) {
   try {
@@ -370,7 +378,7 @@ function buildConfigHtml() {
     "var ql=document.getElementById('ql').value.split('\\n').map(function(l){var i=l.indexOf('|');if(i<0)return null;" +
     "var a=l.slice(0,i).trim(),b=l.slice(i+1).trim();return a&&b?{label:a,text:b}:null}).filter(Boolean);" +
     "var cur=encodeURIComponent(JSON.stringify({hub:hub,vault:document.getElementById('vault').value.trim()||'default',quicklogs:ql}));" +
-    "document.location=hub+'/surface/pebble-config/?return_to='+encodeURIComponent(rt)+'&current='+cur});" +
+    "document.location=" + JSON.stringify(PAGES_CONFIG_URL) + "+'?return_to='+encodeURIComponent(rt)+'&current='+cur});" +
     "</script></body></html>"
   );
 }

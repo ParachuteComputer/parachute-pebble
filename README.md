@@ -105,11 +105,26 @@ is readable, not forensic.
 
 ## Sign in with OAuth (no pasted tokens)
 
-If your hub serves the `pebble-config` surface (parachute-surface ships it),
-the gear page's **"Sign in with your hub"** button opens
-`<hub>/surface/pebble-config/`, runs your hub's own OAuth consent, and hands
-back an auto-renewing token pair — the watch then refreshes its own access
-token on expiry. The pasted-token field remains as a manual fallback.
+The gear page's **"Sign in with your hub"** button opens the **hosted setup
+page** at
+[`parachutecomputer.github.io/parachute-pebble`](https://parachutecomputer.github.io/parachute-pebble/),
+which runs your hub's own OAuth 2.1 + PKCE consent in a real browser and hands
+back an auto-renewing token pair — the watch then refreshes its own access token
+on expiry. The pasted-token field remains as a manual fallback.
+
+**Your server needs only hub + vault.** The setup page is hosted on GitHub Pages
+(a foreign origin), not on your hub — it's the *external-surface* pattern: a
+static page that signs in against whatever hub origin you enter, the same way
+[My Vault UI](https://github.com/unforced/my-vault-ui) does. So you don't need
+the surface-host module installed; a stock Parachute server works. The page runs
+the standard browser-side RFC 7591 Dynamic Client Registration with
+`credentials: "include"`, so **the first connect may show an approve-once screen
+on your hub** (or auto-approve if you're already signed in there). Nothing about
+your token or refresh token leaves your browser except the final hand-back to the
+Pebble app.
+
+> The page is built from [`web/setup/`](web/setup) and deployed by the
+> [Pages workflow](.github/workflows/pages.yml) on every push to `main`.
 
 ## Quick-logs (optional, configurable from the phone)
 
@@ -123,7 +138,7 @@ behind the launch dictation (press BACK) — **rebuilds live**, no reinstall.
 
 1. **v0.3 (here):** voice-first launch, continuous/send-on-pause **voice modes**,
    chained dictation, transcript shown on save, **OAuth sign-in with auto-refresh**
-   (via the hub's `pebble-config` surface), event trail on the gear page,
+   (via the Pages-hosted setup page), event trail on the gear page,
    queue hardening (poisoned items can't block the line), configurable
    quick-logs (none by default), offline queue, SEQ dedupe, JS_READY handshake,
    ACK watchdog.
@@ -141,7 +156,9 @@ behind the launch dictation (press BACK) — **rebuilds live**, no reinstall.
 package.json                 # Pebble manifest (uuid, messageKeys, capabilities)
 src/c/parachute_pebble.c      # watch app: menu + dictation + AppMessage + result UI
 src/pkjs/index.js             # phone side: AppMessage -> vault POST + offline queue
-config/index.html             # optional hosted config page (hub + vault + token)
+config/index.html             # optional hosted config page (paste hub + vault + token)
+web/setup/                    # Pages-hosted OAuth setup page (external-surface flow)
+.github/workflows/pages.yml   # builds web/setup → GitHub Pages
 ```
 
 Part of the [Parachute](https://parachute.computer) ecosystem — exploration tier. AGPL-3.0.

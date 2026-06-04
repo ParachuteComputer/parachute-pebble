@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Parachute Pebble setup</title>
+    <!--
+      GitHub Pages SPA fallback.
+
+      The OAuth redirect URI is "<base>/oauth/callback?code=…&state=…", but Pages
+      serves only static files — there is no "oauth/callback" file, so Pages
+      returns this 404.html for that path. We bounce to the base-path index,
+      PRESERVING the query string, so main.ts's boot() sees ?code&state and
+      finishes the token exchange. (Same trick My Vault UI uses.)
+
+      The base path is the directory the app is served under (e.g.
+      "/parachute-pebble/"); we derive it by stripping a trailing
+      "oauth/callback" off the current path, falling back to "/" for the
+      user/custom-domain case.
+    -->
+    <script>
+      (function () {
+        var path = location.pathname;
+        var base = path.replace(/oauth\/callback\/?$/, "");
+        if (base === path) {
+          // Not the callback path — just land on the directory root.
+          base = path.replace(/[^/]*$/, "");
+        }
+        if (!base || base.charAt(base.length - 1) !== "/") base += "/";
+        location.replace(base + location.search + location.hash);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>
