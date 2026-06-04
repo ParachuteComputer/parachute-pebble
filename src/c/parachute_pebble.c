@@ -185,6 +185,7 @@ static void result_window_unload(Window *window) {
     text_layer_destroy(s_result_detail);
     s_result_detail = NULL;
   }
+  s_result_detail_ptr = NULL; // make the no-stale-detail invariant explicit
   window_destroy(s_result_window);
   s_result_window = NULL;
 }
@@ -298,8 +299,8 @@ static void request_capture(uint32_t key, const char *text) {
   s_pending_key = key;
   s_has_pending = true;
   s_attempts = 0;
+  set_result_detail(s_pending_text); // before the push, so a fresh window loads it
   show_result_window("Sending...");
-  set_result_detail(s_pending_text); // show what we captured while it sends
   try_send_pending();
 }
 
@@ -468,6 +469,10 @@ static void start_voice_leg(void) {
 }
 
 static void begin_voice_capture(void) {
+  if (s_has_pending) {
+    show_result_window("Sending..."); // a capture is still in flight — don't clobber it
+    return;
+  }
   s_accum_len = 0;
   s_accum[0] = '\0';
   start_voice_leg();
@@ -526,7 +531,10 @@ static void menu_select(MenuLayer *ml, MenuIndex *cell_index, void *ctx) {
   }
   int li = quick_log_row(row);
   if (li >= 0 && li < s_log_count) {
-    set_result_detail(NULL);
+    if (s_has_pending) {
+      show_result_window("Sending..."); // a capture is still in flight — don't clobber it
+      return;
+    }
     request_capture(MESSAGE_KEY_CAPTURE_TEXT, s_logs[li].text);
   }
 }

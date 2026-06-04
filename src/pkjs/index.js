@@ -102,6 +102,8 @@ function alreadySeen(seq) {
 }
 function markSeen(seq) {
   if (!seq) return;
+  // 30-entry window; SEQ is wall-clock-seeded on the watch, so cross-session
+  // collision would need a relaunch + capture in the same epoch second — moot.
   seenSeqs.push(seq);
   while (seenSeqs.length > 30) seenSeqs.shift();
 }

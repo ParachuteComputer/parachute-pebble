@@ -58,7 +58,7 @@ pebble sdk install latest
 
 ### 1. Point it at your vault
 
-For v0, edit the constants at the top of [`src/pkjs/index.js`](src/pkjs/index.js):
+For a quick start, edit the constants at the top of [`src/pkjs/index.js`](src/pkjs/index.js):
 
 ```js
 var DEFAULT_HUB   = "https://your-tunnel.example.com"; // phone-reachable hub origin
