@@ -1,0 +1,72 @@
+name: Deploy setup page to GitHub Pages
+
+# Builds the static "Parachute Pebble setup" page (web/setup) and publishes it to
+# GitHub Pages. The page is the external-surface OAuth flow the watch's gear page
+# points at — see web/setup and the README "Sign in with OAuth" section.
+#
+# Published at: https://parachutecomputer.github.io/parachute-pebble/
+# (project Pages → base path /parachute-pebble/; all asset refs are relative so
+#  the same bundle works under that base without rewriting.)
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when the page (or this workflow) changes.
+    paths:
+      - "web/setup/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Allow the GITHUB_TOKEN to deploy to Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One concurrent deploy; let an in-progress run finish (don't cancel a deploy).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/setup
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install deps
+        run: bun install --frozen-lockfile || bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test src/
+
+      - name: Build
+        run: bun run build
+
+      - uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/setup/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

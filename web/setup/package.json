@@ -1,0 +1,17 @@
+{
+  "name": "parachute-pebble-setup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Static GitHub Pages setup page for Parachute Pebble — runs the hub's OAuth 2.1 + PKCE flow from a foreign origin (the external-surface pattern) so a stock hub+vault server can sign a Pebble watch in.",
+  "license": "AGPL-3.0",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "test": "bun test src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

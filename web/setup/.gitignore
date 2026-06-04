@@ -1,0 +1,5 @@
+# Built static output (produced by the Pages workflow / `bun run build`)
+dist/
+
+# Deps
+node_modules/
