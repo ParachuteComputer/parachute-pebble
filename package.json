@@ -1,7 +1,7 @@
 {
   "name": "parachute-pebble",
   "author": "Aaron Gabriel",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
