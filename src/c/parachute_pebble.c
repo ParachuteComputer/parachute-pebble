@@ -67,6 +67,7 @@ static DictationSession *s_dictation_session;
 #endif
 
 static bool s_js_ready;
+static bool s_continuous; // voice mode (phone-configured): false = send on pause, true = keep listening
 static uint32_t s_seq;
 static int s_attempts;
 
@@ -319,6 +320,11 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     }
   }
 
+  Tuple *vm = dict_find(iter, MESSAGE_KEY_VOICE_MODE);
+  if (vm) {
+    s_continuous = vm->value->int32 != 0;
+  }
+
   if (dict_find(iter, MESSAGE_KEY_JS_READY)) {
     s_js_ready = true;
     if (s_ready_fallback_timer) {
@@ -421,8 +427,12 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
     uint64_t elapsed = now_ms() - s_leg_start_ms;
     append_leg(transcription);
     bool nearly_full = s_accum_len + 16 >= s_text_budget;
-    if (elapsed >= AUTO_CONTINUE_MS && !nearly_full) {
-      // The firmware cap ended this leg, not the speaker — keep listening.
+    // Continuous mode: every pause just reopens the mic and the riff keeps
+    // stitching — finish with BACK or by staying silent through a full listen
+    // window. Otherwise, only chain when the leg's wall-clock says the ~15s
+    // firmware cap cut the speaker off (moot on phones whose STT endpoints on
+    // silence first, e.g. the Core app's local mode).
+    if (!nearly_full && (s_continuous || elapsed >= AUTO_CONTINUE_MS)) {
       start_voice_leg();
       return;
     }

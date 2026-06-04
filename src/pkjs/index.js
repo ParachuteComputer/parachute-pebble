@@ -40,6 +40,23 @@ function pad(n) {
   return (n < 10 ? "0" : "") + n;
 }
 
+// ---- event trail (last 12 events, readable on the gear page) ----
+function logEvent(msg) {
+  try {
+    var ev = JSON.parse(localStorage.getItem("pc_events") || "[]");
+    ev.push(new Date().toISOString().slice(11, 19) + " " + msg);
+    while (ev.length > 12) ev.shift();
+    localStorage.setItem("pc_events", JSON.stringify(ev));
+  } catch (e) {}
+}
+function loadEvents() {
+  try {
+    return JSON.parse(localStorage.getItem("pc_events") || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
 // Match the vault path conventions notes-ui uses: text -> Notes/, voice -> Memos/.
 function capturePath(kind, d) {
   var base = kind === "voice" ? "Memos" : "Notes";
@@ -108,7 +125,49 @@ function markSeen(seq) {
   while (seenSeqs.length > 30) seenSeqs.shift();
 }
 
-function postNote(item, cb) {
+// OAuth refresh (tokens delivered by the hub's pebble-config page). Rotates
+// the refresh token when the hub returns a new one.
+function tryRefresh(cb) {
+  var rt = getCfg("refresh_token", "");
+  var te = getCfg("token_endpoint", "");
+  var cid = getCfg("client_id", "");
+  if (!rt || !te || !cid) {
+    cb(false);
+    return;
+  }
+  var xhr = new XMLHttpRequest();
+  xhr.open("POST", te, true);
+  xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  xhr.timeout = 15000;
+  xhr.onload = function () {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try {
+        var r = JSON.parse(xhr.responseText);
+        if (r.access_token) setCfg("token", r.access_token);
+        if (r.refresh_token) setCfg("refresh_token", r.refresh_token);
+        logEvent("token refreshed");
+        cb(true);
+        return;
+      } catch (e) {}
+    }
+    logEvent("refresh failed: http " + xhr.status);
+    cb(false);
+  };
+  xhr.onerror = function () {
+    logEvent("refresh failed: network");
+    cb(false);
+  };
+  xhr.ontimeout = function () {
+    logEvent("refresh failed: timeout");
+    cb(false);
+  };
+  xhr.send(
+    "grant_type=refresh_token&refresh_token=" + encodeURIComponent(rt) +
+    "&client_id=" + encodeURIComponent(cid)
+  );
+}
+
+function postNote(item, cb, isRetry) {
   var hub = getCfg("hub", DEFAULT_HUB).replace(/\/+$/, "");
   var vault = getCfg("vault", DEFAULT_VAULT);
   var token = getCfg("token", DEFAULT_TOKEN);
@@ -130,15 +189,40 @@ function postNote(item, cb) {
   xhr.setRequestHeader("Accept", "application/json");
   xhr.timeout = 15000;
   xhr.onload = function () {
-    cb(xhr.status >= 200 && xhr.status < 300 ? null : "http " + xhr.status);
+    if (xhr.status >= 200 && xhr.status < 300) {
+      logEvent("posted " + item.kind + " (" + item.text.length + " ch)");
+      cb(null);
+    } else if (xhr.status === 401 && !isRetry) {
+      // expired access token — refresh and retry once
+      tryRefresh(function (ok) {
+        if (ok) {
+          postNote(item, cb, true);
+        } else {
+          logEvent("post 401, refresh unavailable");
+          cb("http 401");
+        }
+      });
+    } else {
+      logEvent("post failed: http " + xhr.status);
+      cb("http " + xhr.status);
+    }
   };
   xhr.onerror = function () {
+    logEvent("post failed: network");
     cb("network");
   };
   xhr.ontimeout = function () {
+    logEvent("post failed: timeout");
     cb("timeout");
   };
   xhr.send(body);
+}
+
+// Permanent failures will never succeed on retry; queued items carrying them
+// must be dropped or they block the whole line forever. 401 is NOT permanent
+// (re-auth heals it); neither are 408/429.
+function isPermanentError(err) {
+  return /^http 4\d\d$/.test(err) && err !== "http 401" && err !== "http 408" && err !== "http 429";
 }
 
 // Drain the queue one at a time; stop on the first failure. Guarded so a
@@ -156,7 +240,14 @@ function flushQueue() {
       cur.shift();
       saveQueue(cur);
       flushQueue();
+    } else if (isPermanentError(err)) {
+      var cur2 = loadQueue();
+      var dropped = cur2.shift();
+      saveQueue(cur2);
+      logEvent("DROPPED queued " + (dropped && dropped.kind) + ": " + err);
+      flushQueue(); // a poisoned item must not block the line
     }
+    // transient: stop; we'll retry on the next ready/capture/config event
   });
 }
 
@@ -165,7 +256,9 @@ function ack(status, seq) {
 }
 
 function handleCapture(kind, text, seq) {
+  logEvent("capture " + kind + " seq " + seq);
   if (alreadySeen(seq)) {
+    logEvent("dup seq " + seq + " — re-acked, not re-posted");
     ack("ok", seq);
     return;
   }
@@ -187,8 +280,9 @@ Pebble.addEventListener("ready", function () {
   try {
     localStorage.removeItem("pc_seen"); // stale persisted dedupe state from <=v0.1
   } catch (e) {}
-  // One message: unblock the watch's send gate AND push the current quick-logs.
-  var msg = { JS_READY: 1 };
+  // One message: unblock the watch's send gate AND push config (quick-logs +
+  // voice mode).
+  var msg = { JS_READY: 1, VOICE_MODE: getCfg("voicemode", "0") === "1" ? 1 : 0 };
   var ql = quickLogsString();
   if (ql) msg.QUICK_LOGS = ql;
   Pebble.sendAppMessage(msg);
@@ -248,6 +342,14 @@ function buildConfigHtml() {
     '<textarea id="ql" rows="6" placeholder="Water | Drank water&#10;Meds | Took meds">' +
     escArea(qlLines) + "</textarea>" +
     '<div class="hint">Tap a label on the watch to save that note. Leave empty for voice-only.</div>' +
+    '<label>Voice mode</label><select id="vm">' +
+    '<option value="0"' + (getCfg("voicemode", "0") !== "1" ? " selected" : "") + ">Send on pause</option>" +
+    '<option value="1"' + (getCfg("voicemode", "0") === "1" ? " selected" : "") + ">Continuous (BACK or silence to send)</option>" +
+    "</select>" +
+    '<button id="oauth" style="background:#34c759">Sign in with your hub (OAuth)</button>' +
+    '<div class="hint">Uses the hub origin above; replaces the pasted token with auto-renewing sign-in.</div>' +
+    "<label>Recent activity</label><pre style=\"font-size:11px;background:#fff;border:1px solid #d2d2d7;border-radius:9px;padding:8px;white-space:pre-wrap\">" +
+    escArea(loadEvents().join("\n") || "(no events yet)") + "</pre>" +
     '<button id="save">Save</button><script>' +
     "function qp(n){var m=new RegExp('[?&]'+n+'=([^&]*)').exec(location.search);return m?decodeURIComponent(m[1]):''}" +
     "var rt=qp('return_to')||'pebblejs://close#';" +
@@ -256,8 +358,16 @@ function buildConfigHtml() {
     "var a=l.slice(0,i).trim(),b=l.slice(i+1).trim();return a&&b?{label:a,text:b}:null}).filter(Boolean);" +
     "var out={hub:document.getElementById('hub').value.trim()," +
     "vault:document.getElementById('vault').value.trim()||'default'," +
-    "token:document.getElementById('token').value.trim(),quicklogs:ql};" +
+    "token:document.getElementById('token').value.trim()," +
+    "voicemode:document.getElementById('vm').value,quicklogs:ql};" +
     "document.location=rt+encodeURIComponent(JSON.stringify(out))});" +
+    "document.getElementById('oauth').addEventListener('click',function(){" +
+    "var hub=document.getElementById('hub').value.trim().replace(/\\/+$/,'');" +
+    "if(!hub){alert('Enter your hub origin first');return}" +
+    "var ql=document.getElementById('ql').value.split('\\n').map(function(l){var i=l.indexOf('|');if(i<0)return null;" +
+    "var a=l.slice(0,i).trim(),b=l.slice(i+1).trim();return a&&b?{label:a,text:b}:null}).filter(Boolean);" +
+    "var cur=encodeURIComponent(JSON.stringify({hub:hub,vault:document.getElementById('vault').value.trim()||'default',quicklogs:ql}));" +
+    "document.location=hub+'/surface/pebble-config/?return_to='+encodeURIComponent(rt)+'&current='+cur});" +
     "</script></body></html>"
   );
 }
@@ -286,9 +396,18 @@ Pebble.addEventListener("webviewclosed", function (e) {
     var cfg = JSON.parse(decodeURIComponent(e.response));
     if (cfg.hub !== undefined) setCfg("hub", cfg.hub);
     if (cfg.vault !== undefined) setCfg("vault", cfg.vault);
-    if (cfg.token !== undefined) setCfg("token", cfg.token);
+    if (cfg.token !== undefined && cfg.token !== "") setCfg("token", cfg.token);
+    if (cfg.refresh_token !== undefined && cfg.refresh_token !== "") setCfg("refresh_token", cfg.refresh_token);
+    if (cfg.token_endpoint !== undefined && cfg.token_endpoint !== "") setCfg("token_endpoint", cfg.token_endpoint);
+    if (cfg.client_id !== undefined && cfg.client_id !== "") setCfg("client_id", cfg.client_id);
+    if (cfg.voicemode !== undefined) setCfg("voicemode", String(cfg.voicemode));
     if (cfg.quicklogs !== undefined) setCfg("quicklogs", JSON.stringify(cfg.quicklogs));
-    sendQuickLogs(); // push the updated list to the watch
+    logEvent("config saved" + (cfg.refresh_token ? " (OAuth)" : ""));
+    // push updated config to the watch in one message
+    var m = { VOICE_MODE: getCfg("voicemode", "0") === "1" ? 1 : 0 };
+    var qls = quickLogsString();
+    if (qls) m.QUICK_LOGS = qls;
+    Pebble.sendAppMessage(m);
     flushQueue();
   } catch (err) {}
 });

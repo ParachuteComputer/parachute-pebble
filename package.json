@@ -14,7 +14,7 @@
     "watchapp": {
       "watchface": false
     },
-    "messageKeys": ["CAPTURE_TEXT", "CAPTURE_VOICE", "ACK_STATUS", "JS_READY", "SEQ", "QUICK_LOGS"],
+    "messageKeys": ["CAPTURE_TEXT", "CAPTURE_VOICE", "ACK_STATUS", "JS_READY", "SEQ", "QUICK_LOGS", "VOICE_MODE"],
     "capabilities": ["configurable"],
     "resources": {
       "media": []
