@@ -85,10 +85,6 @@ function quickLogsString() {
   }
   return lines.join("\n").slice(0, 600);
 }
-function sendQuickLogs() {
-  var s = quickLogsString();
-  if (s) Pebble.sendAppMessage({ QUICK_LOGS: s });
-}
 
 // ---- offline queue ----
 function loadQueue() {
@@ -148,7 +144,11 @@ function tryRefresh(cb) {
         logEvent("token refreshed");
         cb(true);
         return;
-      } catch (e) {}
+      } catch (e) {
+        logEvent("refresh failed: unexpected response");
+        cb(false);
+        return;
+      }
     }
     logEvent("refresh failed: http " + xhr.status);
     cb(false);
@@ -270,6 +270,9 @@ function handleCapture(kind, text, seq) {
       ack("ok", seq);
       flushQueue();
     } else {
+      // TODO: a PERMANENT error lands here too — the watch shows "Queued" but
+      // the item will be dropped (with an event-trail entry) on the next
+      // flush. Rare (malformed payload / firmware bug); acceptable for now.
       enqueue(item);
       ack("queued", seq);
     }
