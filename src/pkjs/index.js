@@ -21,12 +21,9 @@ var DEFAULT_TOKEN = ""; // mint with: parachute auth mint-token --scope vault:de
 // hosted copy of config/index.html if your phone's Pebble app won't open data: URLs.
 var CONFIG_URL = "";
 
-// The "Sign in with your hub" button on the gear page opens this static setup
-// page (GitHub Pages, a foreign origin). It runs the hub's OAuth 2.1 + PKCE flow
-// in a real browser against WHATEVER hub the user enters and hands back an
-// auto-renewing token pair. It replaces the old hub-hosted
-// `<hub>/surface/pebble-config/` surface, so a stock hub+vault server (no
-// surface-host module) can still sign the watch in. See web/setup/ + the README.
+// The "Sign in with your hub" button on the gear page hands pkjs an
+// {action:"oauth"} payload and the NATIVE flow below does everything — see the
+// "native OAuth sign-in" section. No hosted pages are involved.
 
 // ---- tiny config store (localStorage, per-app-UUID, survives reinstall) ----
 function getCfg(key, dflt) {
@@ -451,7 +448,7 @@ function beginNativeSignIn(hubRaw, vault) {
       try {
         localStorage.setItem("pc_oauth_pending", JSON.stringify({
           v: verifier, s: stateNonce, cid: cid, te: meta.token_endpoint,
-          hub: hub, vault: vault || "default", at: Date.now()
+          iss: issuer, hub: hub, vault: vault || "default", at: Date.now()
         }));
       } catch (e) { logEvent("sign-in: cannot persist state"); return; }
       var u = meta.authorization_endpoint +
@@ -459,7 +456,7 @@ function beginNativeSignIn(hubRaw, vault) {
         "&redirect_uri=" + encodeURIComponent(REDIRECT) +
         "&response_type=code" +
         "&scope=" + encodeURIComponent("vault:" + (vault || "default") + ":write") +
-        "&state=" + stateNonce +
+        "&state=" + encodeURIComponent(stateNonce) +
         "&code_challenge=" + challenge +
         "&code_challenge_method=S256" +
         "&response_mode=fragment";
@@ -658,6 +655,14 @@ Pebble.addEventListener("webviewclosed", function (e) {
     }
     if (params.error) {
       logEvent("sign-in: hub returned " + params.error);
+      if (params.error === "invalid_client") {
+        // cached client_id is stale (hub registry rebuilt) — drop it so the
+        // next sign-in attempt re-registers instead of dead-ending
+        try {
+          var stale = JSON.parse(localStorage.getItem("pc_oauth_pending") || "null");
+          if (stale && stale.iss) localStorage.removeItem("pc_dcr_cid:" + stale.iss);
+        } catch (e2) {}
+      }
       return;
     }
     return; // unrecognized response
