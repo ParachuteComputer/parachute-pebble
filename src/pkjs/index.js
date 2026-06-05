@@ -27,7 +27,6 @@ var CONFIG_URL = "";
 // auto-renewing token pair. It replaces the old hub-hosted
 // `<hub>/surface/pebble-config/` surface, so a stock hub+vault server (no
 // surface-host module) can still sign the watch in. See web/setup/ + the README.
-var PAGES_CONFIG_URL = "https://parachutecomputer.github.io/parachute-pebble/";
 
 // ---- tiny config store (localStorage, per-app-UUID, survives reinstall) ----
 function getCfg(key, dflt) {
@@ -310,6 +309,238 @@ Pebble.addEventListener("appmessage", function (e) {
   }
 });
 
+
+// ---- native OAuth sign-in (RFC 8252: no hosted pages anywhere) ----
+// The gear page hands us {action:"oauth", hub, ...}; we discover the hub's
+// auth server, register ourselves (DCR; first time lands "pending" and the
+// hub shows its approve-once page right in the sign-in webview), build a
+// PKCE challenge, and open the hub's own consent. The hub redirects to
+// pebblejs://close#code=...&state=... (response_mode=fragment — the only
+// form the phone app delivers; query-form params are dropped), which lands
+// in webviewclosed below, and we exchange the code over XHR.
+
+// Pure-JS SHA-256 (FIPS 180-4) for PKCE S256 — pkjs has no WebCrypto.
+// Verified byte-identical to node:crypto across pad-boundary vectors.
+function sha256Bytes(bytes) {
+  var K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  var bitLen = bytes.length * 8;
+  var padded = bytes.slice();
+  padded.push(0x80);
+  while (padded.length % 64 !== 56) padded.push(0);
+  padded.push(0, 0, 0, 0,
+    (bitLen >>> 24) & 0xff, (bitLen >>> 16) & 0xff, (bitLen >>> 8) & 0xff, bitLen & 0xff);
+  var w = new Array(64);
+  for (var i = 0; i < padded.length; i += 64) {
+    for (var t = 0; t < 16; t++) {
+      w[t] = (padded[i+t*4] << 24) | (padded[i+t*4+1] << 16) | (padded[i+t*4+2] << 8) | padded[i+t*4+3];
+    }
+    for (t = 16; t < 64; t++) {
+      var s0 = ((w[t-15]>>>7)|(w[t-15]<<25)) ^ ((w[t-15]>>>18)|(w[t-15]<<14)) ^ (w[t-15]>>>3);
+      var s1 = ((w[t-2]>>>17)|(w[t-2]<<15)) ^ ((w[t-2]>>>19)|(w[t-2]<<13)) ^ (w[t-2]>>>10);
+      w[t] = (w[t-16] + s0 + w[t-7] + s1) | 0;
+    }
+    var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for (t = 0; t < 64; t++) {
+      var S1 = ((e>>>6)|(e<<26)) ^ ((e>>>11)|(e<<21)) ^ ((e>>>25)|(e<<7));
+      var ch = (e & f) ^ (~e & g);
+      var t1 = (h + S1 + ch + K[t] + w[t]) | 0;
+      var S0 = ((a>>>2)|(a<<30)) ^ ((a>>>13)|(a<<19)) ^ ((a>>>22)|(a<<10));
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var t2 = (S0 + maj) | 0;
+      h=g; g=f; f=e; e=(d+t1)|0; d=c; c=b; b=a; a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0; H[1]=(H[1]+b)|0; H[2]=(H[2]+c)|0; H[3]=(H[3]+d)|0;
+    H[4]=(H[4]+e)|0; H[5]=(H[5]+f)|0; H[6]=(H[6]+g)|0; H[7]=(H[7]+h)|0;
+  }
+  var out = [];
+  for (var j = 0; j < 8; j++) {
+    out.push((H[j]>>>24)&0xff, (H[j]>>>16)&0xff, (H[j]>>>8)&0xff, H[j]&0xff);
+  }
+  return out;
+}
+
+var B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+function b64url(bytes) {
+  var out = "";
+  for (var i = 0; i < bytes.length; i += 3) {
+    var b0 = bytes[i], b1 = i + 1 < bytes.length ? bytes[i+1] : null, b2 = i + 2 < bytes.length ? bytes[i+2] : null;
+    out += B64URL.charAt(b0 >> 2);
+    out += B64URL.charAt(((b0 & 3) << 4) | (b1 === null ? 0 : b1 >> 4));
+    if (b1 !== null) out += B64URL.charAt(((b1 & 15) << 2) | (b2 === null ? 0 : b2 >> 6));
+    if (b2 !== null) out += B64URL.charAt(b2 & 63);
+  }
+  return out;
+}
+
+function asciiBytes(str) {
+  var out = [];
+  for (var i = 0; i < str.length; i++) out.push(str.charCodeAt(i) & 0xff);
+  return out;
+}
+
+// crypto.getRandomValues when the runtime has it; otherwise a mixed fallback.
+// (PKCE still binds the code to this session; hub codes are single-use,
+// short-TTL, and consent-gated — acceptable for the fallback path.)
+function randomBytes(n) {
+  try {
+    if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+      var arr = new Uint8Array(n);
+      crypto.getRandomValues(arr);
+      var out = [];
+      for (var i = 0; i < n; i++) out.push(arr[i]);
+      return out;
+    }
+  } catch (e) {}
+  logEvent("note: weak-entropy fallback for PKCE");
+  var out2 = [];
+  for (var j = 0; j < n; j++) {
+    out2.push((Math.floor(Math.random() * 256) ^ (Date.now() >> (j % 8)) ^ (j * 97)) & 0xff);
+  }
+  return out2;
+}
+
+function normalizeHub(raw) {
+  var h = String(raw || "").trim().replace(/\/+$/, "");
+  if (h && !/^https?:\/\//.test(h)) h = "https://" + h;
+  return h;
+}
+
+function xhrJson(method, url, body, cb) {
+  var xhr = new XMLHttpRequest();
+  xhr.open(method, url, true);
+  xhr.setRequestHeader("Accept", "application/json");
+  if (body) xhr.setRequestHeader("Content-Type", "application/json");
+  xhr.timeout = 15000;
+  xhr.onload = function () {
+    var data = null;
+    try { data = JSON.parse(xhr.responseText); } catch (e) {}
+    cb(xhr.status >= 200 && xhr.status < 300 ? null : "http " + xhr.status, data);
+  };
+  xhr.onerror = function () { cb("network", null); };
+  xhr.ontimeout = function () { cb("timeout", null); };
+  xhr.send(body ? JSON.stringify(body) : null);
+}
+
+var REDIRECT = "pebblejs://close";
+
+function beginNativeSignIn(hubRaw, vault) {
+  var hub = normalizeHub(hubRaw);
+  if (!hub) { logEvent("sign-in: no hub origin"); return; }
+  logEvent("sign-in: discovering " + hub);
+  xhrJson("GET", hub + "/.well-known/oauth-authorization-server", null, function (err, meta) {
+    if (err || !meta || !meta.authorization_endpoint || !meta.token_endpoint || !meta.registration_endpoint) {
+      logEvent("sign-in: discovery failed (" + (err || "bad metadata") + ")");
+      return;
+    }
+    var issuer = meta.issuer || hub;
+    var cachedCid = null;
+    try { cachedCid = localStorage.getItem("pc_dcr_cid:" + issuer); } catch (e) {}
+    function withClient(cid) {
+      var verifier = b64url(randomBytes(32));
+      var stateNonce = b64url(randomBytes(16));
+      var challenge = b64url(sha256Bytes(asciiBytes(verifier)));
+      try {
+        localStorage.setItem("pc_oauth_pending", JSON.stringify({
+          v: verifier, s: stateNonce, cid: cid, te: meta.token_endpoint,
+          hub: hub, vault: vault || "default", at: Date.now()
+        }));
+      } catch (e) { logEvent("sign-in: cannot persist state"); return; }
+      var u = meta.authorization_endpoint +
+        "?client_id=" + encodeURIComponent(cid) +
+        "&redirect_uri=" + encodeURIComponent(REDIRECT) +
+        "&response_type=code" +
+        "&scope=" + encodeURIComponent("vault:" + (vault || "default") + ":write") +
+        "&state=" + stateNonce +
+        "&code_challenge=" + challenge +
+        "&code_challenge_method=S256" +
+        "&response_mode=fragment";
+      logEvent("sign-in: opening hub consent");
+      Pebble.openURL(u);
+    }
+    if (cachedCid) { withClient(cachedCid); return; }
+    xhrJson("POST", meta.registration_endpoint, {
+      client_name: "Parachute Pebble",
+      redirect_uris: [REDIRECT],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none"
+    }, function (rerr, reg) {
+      if (rerr || !reg || !reg.client_id) {
+        logEvent("sign-in: registration failed (" + (rerr || "no client_id") + ")");
+        return;
+      }
+      try { localStorage.setItem("pc_dcr_cid:" + issuer, reg.client_id); } catch (e) {}
+      withClient(reg.client_id);
+    });
+  });
+}
+
+function completeNativeSignIn(params) {
+  var pending = null;
+  try { pending = JSON.parse(localStorage.getItem("pc_oauth_pending") || "null"); } catch (e) {}
+  if (!pending) { logEvent("sign-in: code arrived with no pending state"); return; }
+  if (Date.now() - pending.at > 10 * 60 * 1000) { logEvent("sign-in: stale state, retry"); return; }
+  if (params.state !== pending.s) { logEvent("sign-in: state mismatch"); return; }
+  var xhr = new XMLHttpRequest();
+  xhr.open("POST", pending.te, true);
+  xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  xhr.timeout = 15000;
+  xhr.onload = function () {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try {
+        var tok = JSON.parse(xhr.responseText);
+        if (!tok.access_token) throw new Error("no access_token");
+        setCfg("hub", pending.hub);
+        setCfg("vault", pending.vault);
+        setCfg("token", tok.access_token);
+        if (tok.refresh_token) setCfg("refresh_token", tok.refresh_token);
+        setCfg("token_endpoint", pending.te);
+        setCfg("client_id", pending.cid);
+        try { localStorage.removeItem("pc_oauth_pending"); } catch (e) {}
+        logEvent("signed in (native OAuth)");
+        flushQueue();
+        return;
+      } catch (e) {
+        logEvent("sign-in: bad token response");
+        return;
+      }
+    }
+    logEvent("sign-in: exchange failed http " + xhr.status);
+  };
+  xhr.onerror = function () { logEvent("sign-in: exchange network error"); };
+  xhr.ontimeout = function () { logEvent("sign-in: exchange timeout"); };
+  xhr.send(
+    "grant_type=authorization_code" +
+    "&code=" + encodeURIComponent(params.code) +
+    "&redirect_uri=" + encodeURIComponent(REDIRECT) +
+    "&client_id=" + encodeURIComponent(pending.cid) +
+    "&code_verifier=" + encodeURIComponent(pending.v)
+  );
+}
+
+function parseQueryish(str) {
+  var out = {};
+  var parts = String(str || "").split("&");
+  for (var i = 0; i < parts.length; i++) {
+    var eq = parts[i].indexOf("=");
+    if (eq < 0) continue;
+    var k = parts[i].slice(0, eq);
+    var v = parts[i].slice(eq + 1);
+    try { v = decodeURIComponent(v); } catch (e) {}
+    out[k] = v;
+  }
+  return out;
+}
+
 // ---- config page (hub/vault/token + quick-logs) ----
 function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -377,8 +608,9 @@ function buildConfigHtml() {
     "if(!hub){alert('Enter your hub origin first');return}" +
     "var ql=document.getElementById('ql').value.split('\\n').map(function(l){var i=l.indexOf('|');if(i<0)return null;" +
     "var a=l.slice(0,i).trim(),b=l.slice(i+1).trim();return a&&b?{label:a,text:b}:null}).filter(Boolean);" +
-    "var cur=encodeURIComponent(JSON.stringify({hub:hub,vault:document.getElementById('vault').value.trim()||'default',quicklogs:ql}));" +
-    "document.location=" + JSON.stringify(PAGES_CONFIG_URL) + "+'?return_to='+encodeURIComponent(rt)+'&current='+cur});" +
+    "var out={action:'oauth',hub:hub,vault:document.getElementById('vault').value.trim()||'default'," +
+    "voicemode:document.getElementById('vm').value,quicklogs:ql};" +
+    "document.location=rt+encodeURIComponent(JSON.stringify(out))});" +
     "</script></body></html>"
   );
 }
@@ -402,6 +634,33 @@ Pebble.addEventListener("showConfiguration", function () {
 Pebble.addEventListener("webviewclosed", function (e) {
   if (!e || !e.response) {
     return;
+  }
+  // Three shapes arrive here: (a) the gear page's JSON payloads (config saves
+  // and the {action:"oauth"} hand-off), (b) the hub's OAuth redirect fragment
+  // "code=...&state=..." (the in-app webview path delivers it URL-decoded;
+  // the deep-link path raw — both parse the same), (c) garbage.
+  try {
+    var probe = JSON.parse(decodeURIComponent(e.response));
+    if (probe && probe.action === "oauth") {
+      // store the non-auth config now so it isn't lost if sign-in is abandoned
+      if (probe.hub !== undefined) setCfg("hub", probe.hub);
+      if (probe.vault !== undefined) setCfg("vault", probe.vault);
+      if (probe.voicemode !== undefined) setCfg("voicemode", String(probe.voicemode));
+      if (probe.quicklogs !== undefined) setCfg("quicklogs", JSON.stringify(probe.quicklogs));
+      beginNativeSignIn(probe.hub, probe.vault);
+      return;
+    }
+  } catch (probeErr) {
+    var params = parseQueryish(e.response.replace(/^[#?]/, ""));
+    if (params.code && params.state) {
+      completeNativeSignIn(params);
+      return;
+    }
+    if (params.error) {
+      logEvent("sign-in: hub returned " + params.error);
+      return;
+    }
+    return; // unrecognized response
   }
   try {
     var cfg = JSON.parse(decodeURIComponent(e.response));

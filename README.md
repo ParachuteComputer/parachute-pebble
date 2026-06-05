@@ -103,28 +103,18 @@ silent through a full listen window). The gear page also shows the phone's
 **recent activity** (the last 12 capture/post/queue events) so "did it upload?"
 is readable, not forensic.
 
-## Sign in with OAuth (no pasted tokens)
+## Sign in with OAuth (no pasted tokens, no hosted pages)
 
-The gear page's **"Sign in with your hub"** button opens the **hosted setup
-page** at
-[`parachutecomputer.github.io/parachute-pebble`](https://parachutecomputer.github.io/parachute-pebble/),
-which runs your hub's own OAuth 2.1 + PKCE consent in a real browser and hands
-back an auto-renewing token pair — the watch then refreshes its own access token
-on expiry. The pasted-token field remains as a manual fallback.
+The app is its own setup. On the gear page, enter your hub origin and tap
+**"Sign in with your hub"**: the phone-side JS discovers your hub's auth
+server, registers itself (RFC 7591 — the first time, your hub shows a
+one-tap approve screen right in the sign-in window), and opens your hub's
+own consent page. Approving redirects to `pebblejs://close#code=…`, which
+the app exchanges for an auto-renewing token pair (PKCE S256 throughout).
 
-**Your server needs only hub + vault.** The setup page is hosted on GitHub Pages
-(a foreign origin), not on your hub — it's the *external-surface* pattern: a
-static page that signs in against whatever hub origin you enter, the same way
-[My Vault UI](https://github.com/unforced/my-vault-ui) does. So you don't need
-the surface-host module installed; a stock Parachute server works. The page runs
-the standard browser-side RFC 7591 Dynamic Client Registration with
-`credentials: "include"`, so **the first connect may show an approve-once screen
-on your hub** (or auto-approve if you're already signed in there). Nothing about
-your token or refresh token leaves your browser except the final hand-back to the
-Pebble app.
-
-> The page is built from [`web/setup/`](web/setup) and deployed by the
-> [Pages workflow](.github/workflows/pages.yml) on every push to `main`.
+Your server needs only hub + vault, with hub support for native-app OAuth
+(custom-scheme redirect URIs + `response_mode=fragment` — parachute-hub
+PR #569). The pasted-token field remains as a manual fallback.
 
 ## Quick-logs (optional, configurable from the phone)
 
